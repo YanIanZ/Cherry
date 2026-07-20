@@ -16,6 +16,7 @@ before assuming you can just add it as a dependency to an arbitrary server.
 |---|---|---|
 | Mixin bootstrap (SpongePowered Mixin via a Fabric-Knot `IMixinService`), plugin-mixin discovery, Fabric access-**wideners**, MixinExtras, `leaves-plugin-mixin-condition` conditional mixins | **[LeavesMC/Leavesclip](https://github.com/LeavesMC/Leavesclip)** | The base skeleton. Cherry keeps this as-is; it is what actually loads and applies `@Mixin` classes. |
 | Forge/Paper-style access-**transformers** (`.at` files) | **[CraftCanvasMC/Horizon](https://github.com/CraftCanvasMC/Horizon)**'s `TransformerContainer` | The capability Leaves never had. Ported into [`CherryAccessTransformers`](src/main/java/dev/iyanz/sourbyclip/cherry/at/CherryAccessTransformers.java) and slotted into the Leaves transforming classloader as one more step in its transform chain. |
+| Fabric-ecosystem `fabric.mod.json` server-side mixin/refmap/access-widener declarations | Cherry's own [`fabric`](src/main/java/dev/iyanz/sourbyclip/cherry/fabric) package | Lets a Fabric-format plugin jar's server-side mixin configs and access-widener load too, since Leaves' own discovery only understands `leaves-plugin.json`. See [Fabric support](#fabric-support) for the exact scope. |
 
 Leavesclip's own mixin loader only understands Fabric access-*wideners* (which can only ever
 *widen* access, via a separate declarative file format). It has no equivalent of Forge/NeoForge's
@@ -42,22 +43,45 @@ Horizon's launcher design.**
 
 - **One enable flag**: `-Dcherry.enable.mixin=true` (plus back-compat aliases) turns on the whole
   engine — both the Leaves mixin/widener path and Cherry's AT path.
-- **One manifest**: `cherry-plugin.json` (or the legacy `leaves-plugin.json`) can declare a `mixin`
-  block, an `access-transformers` list, or both.
+- **Multi-format unified discovery**: `cherry-plugin.json`, the legacy `leaves-plugin.json`,
+  `fabric.mod.json`, and the standalone `*.mixins.json` files those manifests reference are all
+  scanned by one pipeline ([`CherryDiscovery`](src/main/java/dev/iyanz/sourbyclip/cherry/discovery/CherryDiscovery.java)),
+  merged, and de-duplicated. See [Discovery formats](#discovery-formats) and [Fabric support](#fabric-support).
 - **AT engine is a no-op by default**: [`Cherry.applyAccessTransformers`](src/main/java/dev/iyanz/sourbyclip/cherry/Cherry.java)
   returns the input byte array unchanged for any class with no registered AT definition, so it is
   cheap to call unconditionally on every class the transforming classloader loads.
 - **Same `.at` grammar as Horizon**: the line grammar and the ASM access-flag bit-twiddling in
   [`CherryAccessTransformers`](src/main/java/dev/iyanz/sourbyclip/cherry/at/CherryAccessTransformers.java)
   are preserved verbatim from Horizon's `TransformerContainer`, so a `.at` file authored for
-  Horizon parses and applies identically under Cherry.
+  Horizon parses and applies identically under Cherry. (Horizon's grammar has no wildcard-member or
+  extra descriptor-matching syntax beyond what was already ported — verified directly against
+  Horizon's source; there was nothing further to port.)
 - **Independent AT discovery**: [`CherryPluginResolver`](src/main/java/dev/iyanz/sourbyclip/cherry/CherryPluginResolver.java)
   scans `plugins/*.jar` on its own, rather than reusing the Leaves engine's plugin list — so a
   plugin that ships *only* an access-transformer (no `mixin` block at all) still gets picked up,
   even though the Leaves pipeline itself drops mixin-less plugins.
 - **Conflict resolution**: if two ATs target the same member, Cherry keeps whichever grants the
   wider visibility and always clears `final` (see `CherryAccessTransformers#lock()`), matching
-  Horizon's own conflict behaviour.
+  Horizon's own conflict behaviour. The same "keep the first, warn about the rest" discipline
+  applies to two plugins declaring a mixin config under the identical resource name (see
+  [`CherryDiscovery`](src/main/java/dev/iyanz/sourbyclip/cherry/discovery/CherryDiscovery.java)).
+- **Priority-ordered mixin configs**: every discovered mixin config's SpongePowered Mixin `priority`
+  field is read and used to sort [`DiscoveryReport.mixinConfigs()`](src/main/java/dev/iyanz/sourbyclip/cherry/discovery/DiscoveryReport.java)
+  deterministically (ascending, default `1000` when omitted, matching Mixin's own default) — see
+  [Discovery formats](#discovery-formats).
+- **Per-plugin kill-switch**: `-Dcherry.disable.plugins=SomePlugin,AnotherPlugin` disables just those
+  plugins' Cherry-owned declarations (access-transformers, Fabric-format mixins/wideners) without
+  disabling Cherry entirely and without repackaging the plugin — alongside the existing global
+  `-Dcherry.enable.mixin` switch. See [Reliability & diagnostics](#reliability--diagnostics).
+- **Dry-run and status API**: [`Cherry.dryRun()`](src/main/java/dev/iyanz/sourbyclip/cherry/Cherry.java)
+  reports what would load without registering/extracting/locking anything, and
+  [`Cherry.status()`](src/main/java/dev/iyanz/sourbyclip/cherry/Cherry.java) layers that with what
+  is actually active — both usable whether or not Cherry is enabled. See
+  [Reliability & diagnostics](#reliability--diagnostics).
+- **Non-fatal, isolated failures everywhere**: a malformed manifest, an unparseable `.at`/mixin-config
+  line, a missing declared file, or one broken plugin jar is logged with the offending plugin and
+  reason and skipped — never fatal, never affecting any other plugin. See
+  [Reliability & diagnostics](#reliability--diagnostics).
 
 ## How it works
 
@@ -85,14 +109,25 @@ class bytes → [1] Mixin transform → [2] Cherry AT engine → [3] access-wide
 
 1. The launcher checks [`Cherry.enabled()`](src/main/java/dev/iyanz/sourbyclip/cherry/Cherry.java).
    If disabled, none of the above runs and classes load unmodified.
-2. If enabled, once the mixin environment is initialized but *before* the transforming
-   classloader starts loading server classes, the launcher calls
-   `Cherry.initAccessTransformers()`, which delegates to
-   [`CherryPluginResolver.resolveAccessTransformers()`](src/main/java/dev/iyanz/sourbyclip/cherry/CherryPluginResolver.java).
-   This scans every jar in `plugins/`, reads `cherry-plugin.json` (falling back to
-   `leaves-plugin.json`), registers each declared `.at` file's contents, and then **locks** the
-   registry (`CherryAccessTransformers#lock()`), resolving any conflicts and freezing it before a
-   single server class is loaded.
+2. If enabled, the launcher drives Cherry's init entry points. There are two timing-distinct calls
+   (see [`Cherry`](src/main/java/dev/iyanz/sourbyclip/cherry/Cherry.java)'s class javadoc for the
+   full "three tiers" breakdown):
+   - **Before constructing the transforming classloader** — `Cherry.initFabricMixins()` (or the
+     combined `Cherry.init(pluginsDir, cacheDir)`) must run here, because
+     [`Cherry.fabricJarUrls()`](src/main/java/dev/iyanz/sourbyclip/cherry/Cherry.java) needs to be
+     merged into the classloader's classpath at construction time — see
+     [Fabric support](#fabric-support) for exactly why.
+   - **After the mixin environment is initialized, before any server class loads** —
+     `Cherry.initAccessTransformers()` (the original, already-integrated call) discovers and commits
+     access-transformers via
+     [`CherryPluginResolver.resolveAccessTransformers()`](src/main/java/dev/iyanz/sourbyclip/cherry/CherryPluginResolver.java),
+     then **locks** the registry (`CherryAccessTransformers#lock()`), resolving any conflicts and
+     freezing it before a single server class is loaded.
+
+   Both paths start from the same [`CherryDiscovery.scan()`](src/main/java/dev/iyanz/sourbyclip/cherry/discovery/CherryDiscovery.java)
+   pipeline described in [Discovery formats](#discovery-formats). `Cherry.init()` runs both in one
+   call and logs the one combined `Cherry ready: N mixin plugin(s), M access-transformer(s), K
+   widener(s)` summary line.
 3. From then on every class load runs the three-step pipeline above.
 
 **Conditional mixins.** Leaves' `leaves-plugin-mixin-condition` lets a `@Mixin` class carry
@@ -100,6 +135,136 @@ class bytes → [1] Mixin transform → [2] Cherry AT engine → [3] access-wide
 is entirely on the Leaves side of the pipeline (Cherry's AT engine has no concept of conditions);
 see [Limitations](#limitations) for an important caveat about how build metadata reaches this
 system on SourbyClip specifically.
+
+## Discovery formats
+
+[`CherryDiscovery`](src/main/java/dev/iyanz/sourbyclip/cherry/discovery/CherryDiscovery.java) is the
+one pipeline behind every entry point above: it scans every `.jar` under `plugins/` and reads
+whichever of these manifest formats a jar declares, merging the results and de-duplicating across
+plugins.
+
+| Format | Declares | Read by | Who registers it |
+|---|---|---|---|
+| `cherry-plugin.json` (preferred) | `mixin` block (Leaves engine), `access-transformers` list (Cherry AT engine) | Cherry (own scan, independent of Leaves') | Leaves engine (mixin block) + Cherry (AT list) |
+| `leaves-plugin.json` (legacy back-compat; ignored if `cherry-plugin.json` is also present) | same `mixin`/`access-transformers` shape | same as above | same as above |
+| `fabric.mod.json` | `mixins` array (config file names or `{config, environment}` objects), `accessWidener` field | Cherry only — Leaves has no notion of this format | [`CherryFabricBridge`](src/main/java/dev/iyanz/sourbyclip/cherry/fabric/CherryFabricBridge.java) (see [Fabric support](#fabric-support)) |
+| standalone `*.mixins.json` (the SpongePowered Mixin config files the two formats above reference) | `package`, `refmap`, `priority`, and the actual `mixins`/`client`/`server` class lists | Cherry, to read `package`/`refmap`/`priority` ([`MixinConfigMeta`](src/main/java/dev/iyanz/sourbyclip/cherry/manifest/MixinConfigMeta.java)); Mixin itself, to actually apply the config | Whoever registered the containing manifest's config reference |
+
+Every declaration discovered this way becomes a
+[`DiscoveredMixinConfig`](src/main/java/dev/iyanz/sourbyclip/cherry/discovery/DiscoveredMixinConfig.java)/
+[`DiscoveredAccessTransformer`](src/main/java/dev/iyanz/sourbyclip/cherry/discovery/DiscoveredAccessTransformer.java)/
+[`DiscoveredAccessWidener`](src/main/java/dev/iyanz/sourbyclip/cherry/discovery/DiscoveredAccessWidener.java)
+in one [`DiscoveryReport`](src/main/java/dev/iyanz/sourbyclip/cherry/discovery/DiscoveryReport.java),
+with mixin configs sorted by their SpongePowered Mixin `priority` field (ascending, default `1000`
+when a config omits it). Anything found but not included — a missing declared file, a duplicate
+resource name claimed by two different plugins, a disabled plugin, a Fabric config missing its
+required `package` field, a corrupt jar — is recorded in `DiscoveryReport.skipped()` with a reason,
+never silently dropped and never fatal to the rest of the scan.
+
+## Fabric support
+
+Cherry's discovery additionally understands the Fabric-ecosystem manifest format, so a plugin jar
+built the Fabric way (a `fabric.mod.json` alongside SpongePowered Mixin config files) can still load
+its **server-side** mixins, refmap, and access-widener under Cherry — without shipping a
+`cherry-plugin.json` at all.
+
+### What's supported
+
+- **`fabric.mod.json`'s `mixins` array.** Each entry is either a bare config-file-name string
+  (applies universally) or an object `{"config": "...", "environment": "client"|"server"|"*"}`.
+  Cherry honors `environment`: only `server` and `*` (universal) entries are loaded; `client`-only
+  entries are recorded in [`DiscoveryReport.skipped()`](src/main/java/dev/iyanz/sourbyclip/cherry/discovery/DiscoveryReport.java)
+  with a clear reason and never touched — Cherry runs on a dedicated server, which never has a
+  client side to load one for.
+- **Refmaps.** A referenced `*.mixins.json`'s own `refmap` field (the standard SpongePowered Mixin
+  config field Fabric mods rely on for obfuscation-mapped mixins) is read via
+  [`MixinConfigMeta`](src/main/java/dev/iyanz/sourbyclip/cherry/manifest/MixinConfigMeta.java) and,
+  when the referenced refmap file actually exists in the jar, staged alongside the config and its
+  mixin classes by [`CherryFabricBridge`](src/main/java/dev/iyanz/sourbyclip/cherry/fabric/CherryFabricBridge.java)
+  so Mixin can find it on the classpath. A refmap declared but missing from the jar degrades
+  gracefully — Mixin itself falls back to an identity reference map and Cherry logs a clear warning
+  — it is never treated as fatal.
+- **Fabric access-wideners.** `fabric.mod.json`'s top-level `accessWidener` field is extracted the
+  same way and its resource name exposed via
+  [`Cherry.fabricAccessWidenerConfigs()`](src/main/java/dev/iyanz/sourbyclip/cherry/Cherry.java), to
+  be merged into the same Leaves `AccessWidenerManager` pipeline that a `cherry-plugin.json`'s
+  `mixin.access-widener` field already feeds.
+- **Extraction + caching.** Because Leaves' own plugin pipeline has no notion of `fabric.mod.json`,
+  Cherry runs its own independent extraction
+  ([`CherryFabricBridge`](src/main/java/dev/iyanz/sourbyclip/cherry/fabric/CherryFabricBridge.java)):
+  for each contributing plugin, it copies the config, its refmap (if present), the widener (if
+  present), and every class file under the config's declared `package` prefix into one cached jar
+  under `plugins/.cherry-mixins/`, keyed by an MD5 hash of the source plugin jar (the same
+  hash-and-skip-if-unchanged scheme Leaves' own `PluginResolver` uses for its `.mixins.jar` cache),
+  and removes cache jars for plugins no longer discovered.
+
+### Integration contract
+
+`Cherry.initFabricMixins()` populates three accessors the host launcher merges into the same places
+Leaves' own `MixinJarResolver` fields already feed:
+
+| Accessor | Merge into | Timing |
+|---|---|---|
+| [`Cherry.fabricJarUrls()`](src/main/java/dev/iyanz/sourbyclip/cherry/Cherry.java) | the URL array passed to `MixinURLClassLoader`'s constructor | **before** that classloader is constructed |
+| [`Cherry.fabricMixinConfigNames()`](src/main/java/dev/iyanz/sourbyclip/cherry/Cherry.java) | `Mixins.addConfiguration(String)`, one call per name, after the jar URLs above are on the classpath | after `MixinBootstrap.init()` |
+| [`Cherry.fabricAccessWidenerConfigs()`](src/main/java/dev/iyanz/sourbyclip/cherry/Cherry.java) | whatever list feeds `AccessWidenerManager.initAccessWidener` | before that call |
+
+This mirrors, on purpose, exactly how `Leavesclip.main` already consumes
+`MixinJarResolver.jarUrls`/`mixinConfigs`/`accessWidenerConfigs` — a host integration that already
+wires up that pattern for Leaves' own pipeline has minimal new glue to write for Cherry's Fabric
+bridge.
+
+### Honest scope
+
+**This loads Fabric-format server-side mixin/access-widener/config declarations into the server's
+existing SpongePowered Mixin environment. It does not run a Fabric mod loader.** Concretely, Cherry
+does **not**:
+
+- resolve Fabric mod dependencies, run mod entrypoints, or do anything with `fabric.mod.json` fields
+  other than `mixins` and `accessWidener`;
+- run any client-side code or client-only mixin config (filtered out at discovery, see above);
+- provide the Fabric API, Fabric's item/block/registry systems, or any other part of a real Fabric
+  mod's runtime environment — a jar built as a genuine Fabric mod will not run as a mod under Cherry,
+  only the server-side mixin/AT/AW declarations it happens to also carry will be loaded.
+
+If a plugin needs actual Fabric mod functionality (not just mixins), Cherry is not a substitute for
+a real Fabric mod loader.
+
+## Reliability & diagnostics
+
+- **Nothing here can crash boot.** A malformed `cherry-plugin.json`/`leaves-plugin.json`/
+  `fabric.mod.json`, an unparseable `.at` line or mixin-config JSON, a declared file missing from
+  the jar, a corrupt jar, or one plugin's Fabric extraction failing are all caught, logged with the
+  offending plugin/jar and a specific reason, and skipped — every other plugin's declarations still
+  load. See [`CherryDiscovery`](src/main/java/dev/iyanz/sourbyclip/cherry/discovery/CherryDiscovery.java)'s
+  and [`CherryFabricBridge`](src/main/java/dev/iyanz/sourbyclip/cherry/fabric/CherryFabricBridge.java)'s
+  class javadoc for the exhaustive list of what is isolated and how.
+- **Thread-safe AT registry.** [`CherryAccessTransformers`](src/main/java/dev/iyanz/sourbyclip/cherry/at/CherryAccessTransformers.java)
+  builds definitions into a private staging map during the single-threaded discovery phase, then
+  `lock()` publishes one fully immutable snapshot through a single `volatile` reference. Every
+  `applyToBytes` call (which runs on whatever thread is loading a class, potentially many
+  concurrently) takes one volatile read and then only ever sees a complete, unmodifiable registry —
+  there is no shared mutable state, and no locking, on that hot path.
+- **Logging discipline.** One concise summary at ready
+  (`Cherry ready: N mixin plugin(s), M access-transformer(s), K widener(s)`, from
+  [`DiscoveryReport.summaryLine()`](src/main/java/dev/iyanz/sourbyclip/cherry/discovery/DiscoveryReport.java)),
+  per-item detail at DEBUG (e.g. every individual AT application), and precise WARN/ERROR lines that
+  always name the offending plugin and the reason.
+- **Global kill-switch**: `-Dcherry.enable.mixin=true` (plus aliases) — unchanged, existing.
+- **Per-plugin kill-switch**: `-Dcherry.disable.plugins=SomePlugin,AnotherPlugin`
+  ([`CherryPluginFilter`](src/main/java/dev/iyanz/sourbyclip/cherry/discovery/CherryPluginFilter.java))
+  — exact, case-sensitive name match, disables only that plugin's Cherry-owned declarations
+  (access-transformers, Fabric-format mixins/wideners). It does not affect a Leaves-handled `mixin`
+  block, which is outside Cherry's control — see [Limitations](#limitations).
+- **Dry-run**: [`Cherry.dryRun()`](src/main/java/dev/iyanz/sourbyclip/cherry/Cherry.java) /
+  `Cherry.dryRun(File)` runs the exact same discovery as a real boot, without registering,
+  extracting, or locking anything — safe to call whether or not Cherry is enabled, for previewing
+  what a new plugin (or flipping the enable flag) would load.
+- **Status API**: [`Cherry.status()`](src/main/java/dev/iyanz/sourbyclip/cherry/Cherry.java) /
+  `Cherry.status(File)` returns a [`CherryStatus`](src/main/java/dev/iyanz/sourbyclip/cherry/CherryStatus.java)
+  combining a fresh dry-run with what the AT and Fabric engines actually have active right now
+  (locked/registered counts, extracted configs/wideners). This is the data source intended for a
+  future `/cherry` operator command — this repository adds the API only, not the command.
 
 ## Plugin author guide
 
@@ -140,6 +305,43 @@ Leaves-only plugins that predate Cherry).
 Both `mixin` and `access-transformers` are optional and independent: a plugin can declare only
 `access-transformers` (pure AT, no mixins at all — this is exactly the case
 `CherryPluginResolver`'s independent jar scan exists to support), only `mixin`, or both.
+
+### Fabric manifest schema (alternative to `cherry-plugin.json`)
+
+A plugin built the Fabric-ecosystem way can skip `cherry-plugin.json` entirely and declare its
+server-side mixins/access-widener in `fabric.mod.json` instead — see [Fabric support](#fabric-support)
+for the full scope and the honest limitations (this loads mixins/AW only, not a Fabric mod runtime).
+A plugin may ship both a `cherry-plugin.json` *and* a `fabric.mod.json`; Cherry reads both.
+
+```jsonc
+// fabric.mod.json — at the jar root, the standard Fabric mod-metadata file
+{
+  "id": "myplugin",
+
+  // Each entry is either a bare config-file name (applies to every environment) or an object with
+  // an explicit "environment". Cherry loads "server" and "*" entries; "client"-only entries are
+  // skipped (recorded in DiscoveryReport.skipped() with a reason, never an error).
+  "mixins": [
+    "myplugin.common.mixins.json",
+    {"config": "myplugin.server.mixins.json", "environment": "server"},
+    {"config": "myplugin.client.mixins.json", "environment": "client"}
+  ],
+
+  // Optional. Same Fabric access-widener format Leaves already supports via mixin.access-widener,
+  // just declared the Fabric way.
+  "accessWidener": "myplugin.accesswidener"
+}
+```
+
+```jsonc
+// myplugin.server.mixins.json — a standard SpongePowered Mixin config, referenced above
+{
+  "package": "com.me.myplugin.mixin",  // required - Cherry extracts every class under this package
+  "refmap": "myplugin.refmap.json",    // optional - staged alongside the config if present in the jar
+  "priority": 1000,                     // optional - defaults to 1000 (SpongePowered Mixin's own default)
+  "mixins": ["MixinSomeMob"]
+}
+```
 
 ### Access-transformer (`.at`) file format
 
@@ -186,6 +388,22 @@ myplugin.jar
         └── MixinSomeMob.class
 ```
 
+A Fabric-format plugin looks the same, with `fabric.mod.json` (and its referenced `*.mixins.json`
+files) instead of/alongside `cherry-plugin.json`:
+
+```
+myplugin.jar
+├── paper-plugin.yml                 # still a normal Paper plugin, regardless of manifest format
+├── fabric.mod.json                  # Fabric-ecosystem manifest (see Fabric support)
+├── myplugin.server.mixins.json      # referenced by fabric.mod.json's "mixins"
+├── myplugin.refmap.json             # referenced by the config's own "refmap" field, if present
+├── myplugin.accesswidener           # referenced by fabric.mod.json's "accessWidener"
+└── com/me/myplugin/
+    ├── MyPlugin.class
+    └── mixin/                        # the config's "package" field - your @Mixin classes
+        └── MixinSomeMob.class
+```
+
 ### Enabling the engine
 
 Nothing runs unless the server is started with the JVM property that gates
@@ -206,7 +424,7 @@ Back-compat aliases (any one of these also enables it, checked in this order):
 ## How Cherry is actually consumed
 
 Cherry is **not published as a standalone runtime jar that any server can drop into a plugins
-folder or add as a Maven dependency to get mixin support.** Its two integration points —
+folder or add as a Maven dependency to get mixin support.** Its integration points —
 `Cherry.applyAccessTransformers` being called from inside `MixinURLClassLoader.findClass`, and
 `Cherry.initAccessTransformers` being called from the launcher's startup sequence — are compiled
 directly into SourbyClip's own launcher module (`sourbyclip/java25`), in the same classloader as
@@ -214,8 +432,16 @@ Leaves' `MixinURLClassLoader`, `PluginResolver`, and `logger` classes. Cherry on
 that whole launcher; it cannot be pointed at a stock Paper, Leaves, or Horizon server and "just
 work" by itself.
 
-Concretely: SourbyClip vendors Cherry's exact source (the same six files under
-`src/main/java/dev/iyanz/sourbyclip/cherry/` in this repository) directly into
+At the time of writing, only those two integration points are actually wired into SourbyClip's
+launcher. The Fabric bridge and diagnostics API this repository adds (`Cherry.initFabricMixins()`/
+`Cherry.init()`/`Cherry.status()`/`Cherry.dryRun()` and their accessors) exist in Cherry's source and
+are fully covered by this repository's own tests, but are not yet called from SourbyClip's launcher
+— wiring them in (per the [Fabric support](#fabric-support) integration contract) is a separate,
+future sync step, tracked outside this repository.
+
+Concretely: SourbyClip vendors Cherry's exact source (every file under
+`src/main/java/dev/iyanz/sourbyclip/cherry/` in this repository — the root package plus the
+`at`/`discovery`/`fabric`/`manifest` sub-packages) directly into
 `sourbyclip/java25/src/main/java/dev/iyanz/sourbyclip/cherry/`, compiled as part of that module
 alongside SourbyClip's own fork of Leavesclip. This repository is kept as the canonical,
 independently buildable and documented copy — it is **not** currently wired up as an automated
@@ -225,9 +451,9 @@ today); it has no meaning outside that launcher.
 
 ### Why this repository still needs a `hostStub` source set
 
-Two of Cherry's own classes (`CherryPluginResolver`, `CherryAccessTransformers`) import small
-Leavesclip host classes: `org.leavesmc.leavesclip.logger.{Logger,SimpleLogger}` and
-`org.leavesmc.leavesclip.mixin.{LeavesPluginMeta,PluginResolver}`. These are **not published to
+Several of Cherry's own classes (`CherryPluginResolver`, `CherryAccessTransformers`,
+`CherryDiscovery`) import small Leavesclip host classes: `org.leavesmc.leavesclip.logger.{Logger,SimpleLogger}`
+and `org.leavesmc.leavesclip.mixin.{LeavesPluginMeta,PluginResolver}`. These are **not published to
 any Maven repository** — Leavesclip is a launcher, forked directly into SourbyClip's own source
 tree, not a library artifact. So this repository cannot simply add "leavesclip" as a dependency.
 
@@ -235,9 +461,23 @@ To still let `./gradlew build` / `./gradlew javadoc` succeed standalone, `src/ho
 contains minimal, explicitly-labeled compile-time stand-ins for just the members Cherry's own code
 actually touches (see the javadoc on each file in that directory for exactly what is and isn't
 reproduced, and why). They are wired into the build **only** as a `compileOnly`-style input to
-`main`'s compile classpath — they are never referenced anywhere else, and are excluded from every
-published artifact (the jar, the sources jar, and the javadoc jar all contain `main` only; see
-`build.gradle.kts`). At runtime inside SourbyClip, the real classes are used instead.
+`main`'s compile classpath (plus `test`'s classpath, so this repository's own unit tests can
+actually execute the code they exercise — see [Building this repository](#building-this-repository))
+— they are never referenced anywhere else, and are excluded from every published artifact (the jar,
+the sources jar, and the javadoc jar all contain `main` only; see `build.gradle.kts`). At runtime
+inside SourbyClip, the real classes are used instead.
+
+**Sync note.** `LeavesPluginMeta`'s `accessTransformers` field now carries an explicit
+`@SerializedName("access-transformers")`. Without it, Gson's default (literal, no kebab-case
+conversion) field-naming silently never binds the documented `"access-transformers"` manifest key —
+`getAccessTransformers()` always returns `null` even for a correct manifest. This was an actual bug
+in this stub, caught by this repository's own tests once they started asserting on parsed
+access-transformer lists; if SourbyClip's real, vendored `LeavesPluginMeta` is missing the same
+annotation, it has the identical bug and needs the same one-line fix when this repository's changes
+are synced in. The stub's `LeavesPluginMeta.MixinConfig` nested class (added for
+`CherryDiscovery`'s reporting of Leaves-declared mixin configs/wideners) mirrors upstream
+Leavesclip's shape exactly and needs no corresponding SourbyClip-side change — see that class's
+javadoc.
 
 ## Limitations
 
@@ -264,6 +504,22 @@ published artifact (the jar, the sources jar, and the javadoc jar all contain `m
 - **Process-wide, single-registry AT engine.** `CherryAccessTransformers.INSTANCE` is one static
   singleton locked once at startup; there is no per-plugin or per-classloader isolation, and no
   way to register new ATs after the initial scan.
+- **Fabric support loads mixins/AW only, not a Fabric mod runtime.** No mod loader, no entrypoints,
+  no dependency resolution, nothing client-side — see [Fabric support](#fabric-support)'s "Honest
+  scope" for the full statement. A jar built as a genuine Fabric mod will not run as one under
+  Cherry.
+- **Duplicate mixin-config resource names are resolved by scan order, not negotiation.** If two
+  different plugins declare a config under the identical file name, the one from the
+  alphabetically-first jar wins and the other is skipped with a logged reason
+  (`DiscoveryReport.skipped()`) — this is deterministic but arbitrary from a plugin author's
+  perspective; avoid generic config file names to prevent collisions with other plugins entirely.
+- **Cherry's priority ordering governs its own bookkeeping and registration call order, not Mixin's
+  transform ordering.** SpongePowered Mixin already sorts registered configs by their own `priority`
+  field when it *applies* mixins, regardless of what order `Mixins.addConfiguration` was called in.
+  Cherry additionally reads and sorts by the same field so its own discovery report, status output,
+  and Fabric-config registration order are deterministic and human-readable — this is a genuinely
+  useful ordering guarantee for Cherry's own output, not a mechanism that overrides or duplicates
+  Mixin's own priority handling.
 - **Not a drop-in jar.** As covered above, Cherry only runs as vendored source inside SourbyClip's
   launcher module — this repository is the canonical/documentation copy, not a jar you can add to
   an arbitrary server's classpath.
@@ -274,18 +530,37 @@ Requires JDK 25 (or newer — the toolchain block will provision one if your mac
 it). A Gradle wrapper is included, pinned to Gradle 9.5.1.
 
 ```
-./gradlew build     # compiles, runs the (currently empty) test task, assembles jar + sourcesJar + javadocJar
+./gradlew build     # compiles, runs the JUnit test suite, assembles jar + sourcesJar + javadocJar
+./gradlew test       # just the test suite (src/test/java)
 ./gradlew javadoc    # generates API docs into build/docs/javadoc (gitignored — not committed)
 ```
 
-Both compile `src/main/java` (the real Cherry source) against:
+`src/main/java` (the real Cherry source) compiles against:
 
-- `com.google.code.gson:gson` — a genuine runtime dependency (`CherryPluginResolver` deserializes
-  manifests with it), matching the version SourbyClip itself bundles.
+- `com.google.code.gson:gson` — a genuine runtime dependency (`CherryPluginResolver`/`CherryDiscovery`
+  deserialize manifests with it), matching the version SourbyClip itself bundles.
 - `org.ow2.asm:asm-tree` and `net.fabricmc:sponge-mixin` — `compileOnly`: both are always present
   on the host's runtime classpath already (SourbyClip's launcher pulls in Mixin, which pulls in
   ASM), so Cherry never bundles its own copies.
 - The `hostStub` source set's output — `compileOnly`, for the reasons explained above.
+
+`src/test/java` holds real JUnit 5 tests for every pure-logic piece: AT DSL parsing and conflict
+resolution (including a real-bytecode round trip through ASM and a concurrent-access smoke test),
+`fabric.mod.json`/`*.mixins.json` parsing, multi-format discovery de-duplication and priority
+ordering, the per-plugin kill-switch, and the Fabric mixin/widener extraction-and-caching mechanics
+(built against real, temporary fixture jars — see `src/test/java/.../testutil/JarBuilder.java`).
+This is appropriate here even though SourbyCraft server sub-specs avoid JUnit in favor of booting a
+real server: this is a standalone library repository, verified by `./gradlew test`, not a
+SourbyCraft server sub-spec. What full runtime mixin-loading inside SourbyClip's actual launcher
+still cannot be exercised standalone (see [Limitations](#limitations) and [How Cherry is actually
+consumed](#how-cherry-is-actually-consumed)) is verified manually, in SourbyClip itself, after a
+sync.
+
+Tests additionally depend on `org.junit.jupiter:junit-jupiter`, and re-add `org.ow2.asm:asm-tree` /
+`net.fabricmc:sponge-mixin` / the `hostStub` output as test-scoped dependencies, since this
+repository's own test execution has no host launcher supplying them at runtime the way SourbyClip
+does in production — see the comments in `build.gradle.kts` for exactly why each one is there. None
+of this affects the published `main`/sources/javadoc jars.
 
 ## Credits / attribution
 
@@ -306,6 +581,12 @@ Cherry is a derivative work combining code from two upstream projects, both MIT-
 - **[SpongePowered/Mixin](https://github.com/SpongePowered/Mixin)** (via its Fabric fork,
   `net.fabricmc:sponge-mixin`) — MIT licensed — provides the `ILogger`/`Level` types the Leavesclip
   logger classes (and this repository's `hostStub` reproduction of them) build on.
+
+Cherry's [Fabric support](#fabric-support) (the `manifest`, `discovery`, and `fabric` packages) is
+an original, independent implementation of the publicly documented `fabric.mod.json` and
+SpongePowered Mixin config JSON **schemas** — no code is copied from FabricMC/fabric-loader or any
+other Fabric-ecosystem project; only the openly published file-format shapes are read, with Gson
+models Cherry wrote itself.
 
 See [NOTICE.md](NOTICE.md) for the full upstream license texts and per-file provenance.
 

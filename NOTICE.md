@@ -98,6 +98,19 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
+## Fabric mod-metadata format (fabric.mod.json / SpongePowered Mixin config JSON)
+
+Cherry's Fabric-format support (`dev.iyanz.sourbyclip.cherry.manifest`,
+`dev.iyanz.sourbyclip.cherry.discovery`, and `dev.iyanz.sourbyclip.cherry.fabric`) reads two openly
+documented JSON **schemas** — the Fabric mod-metadata format (`fabric.mod.json`) and the
+SpongePowered Mixin config format (`*.mixins.json`) — using Gson models written from scratch for
+this repository. No source code is copied or adapted from FabricMC/fabric-loader, FabricMC/Yarn, or
+any other Fabric-ecosystem project; only the publicly published file-format shapes (field names such
+as `mixins`, `accessWidener`, `package`, `refmap`, `priority`, and their documented value shapes) are
+read. This section exists purely for completeness/transparency, not because any upstream license
+obligation applies here — see the repository README's [Fabric support](README.md#fabric-support)
+section for the exact scope of what is (and is not) implemented.
+
 ## SpongePowered / Mixin
 
 - Repository: <https://github.com/SpongePowered/Mixin> (consumed via its Fabric fork,

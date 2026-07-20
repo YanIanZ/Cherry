@@ -72,15 +72,48 @@ dependencies {
 
     // See the hostStub sourceSet comment above: compiled in for `main` at compile time only.
     compileOnly(sourceSets["hostStub"].output)
+
+    // --- Test-only dependencies ---
+
+    // JUnit 5 for the pure-logic unit tests under src/test/java: AT DSL parsing, fabric.mod.json /
+    // standalone *.mixins.json parsing, multi-format discovery de-dup + priority ordering, and the
+    // Fabric mixin/widener extraction+caching mechanics. Appropriate here even though SourbyCraft
+    // server sub-specs avoid JUnit: this is a standalone library repository verified by
+    // `./gradlew test`, not a SourbyCraft server sub-spec verified by booting a real server.
+    testImplementation("org.junit.jupiter:junit-jupiter:5.11.4")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+
+    // main's own sources are compiled against these as `compileOnly` because the host (SourbyClip)
+    // always supplies them at runtime in production - see the dependency block above. This
+    // repository's own test execution has no such host, so the same libraries are added back here
+    // purely so `./gradlew test` can actually exercise code that touches ASM
+    // (CherryAccessTransformers, CherryFabricBridge) and the Logger/SimpleLogger hostStub
+    // reproduction. None of this affects the published main/sources/javadoc jars. asm-tree is
+    // `testImplementation` (not testRuntimeOnly) because CherryAccessTransformersTest inspects the
+    // transformed bytecode directly with ASM's tree API to assert access flags actually changed.
+    testImplementation("org.ow2.asm:asm-tree:9.7.1")
+    testRuntimeOnly("net.fabricmc:sponge-mixin:0.17.3+mixin.0.8.7") {
+        exclude(group = "com.google.code.gson", module = "gson")
+        exclude(group = "com.google.guava", module = "guava")
+    }
+    testCompileOnly(sourceSets["hostStub"].output)
+    testRuntimeOnly(sourceSets["hostStub"].output)
 }
 
 dependencies {
-    // hostStub's own compile-time dependency: the SpongePowered Mixin ILogger/Level types that the
-    // real (and this stand-in) Logger/SimpleLogger implement.
+    // hostStub's own compile-time dependencies: the SpongePowered Mixin ILogger/Level types that the
+    // real (and this stand-in) Logger/SimpleLogger implement, and Gson's @SerializedName, used by
+    // the LeavesPluginMeta stand-in's nested MixinConfig to mirror upstream Leavesclip's JSON field
+    // names (package-name/access-widener) exactly.
     "hostStubCompileOnly"("net.fabricmc:sponge-mixin:0.17.3+mixin.0.8.7") {
         exclude(group = "com.google.code.gson", module = "gson")
         exclude(group = "com.google.guava", module = "guava")
     }
+    "hostStubCompileOnly"("com.google.code.gson:gson:2.13.1")
+}
+
+tasks.test {
+    useJUnitPlatform()
 }
 
 tasks.named<Jar>("jar") {
