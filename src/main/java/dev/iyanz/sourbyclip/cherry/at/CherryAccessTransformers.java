@@ -79,8 +79,9 @@ public final class CherryAccessTransformers {
     private static final Pattern MODIFIER_PREFIX =
         Pattern.compile("^\\s*(public|protected|private|default)([+-]f)?\\b");
 
-    private static final int VIS_PUBLIC = 3;
-    private static final int VIS_PROTECTED = 2;
+    private static final int VIS_PUBLIC = 4;
+    private static final int VIS_PROTECTED = 3;
+    private static final int VIS_DEFAULT = 2;
     private static final int VIS_PRIVATE = 1;
 
     /** internal class name (a/b/C) -> its AT definitions, mutated only under this instance's monitor, pre-lock. */
@@ -281,9 +282,21 @@ public final class CherryAccessTransformers {
     }
 
     private static int visibilityRank(AccessChange.Access access) {
+        // Strictly monotonic in actual JVM visibility order (PRIVATE < DEFAULT < PROTECTED < PUBLIC).
+        // PUBLIC and DEFAULT previously shared one rank (both VIS_PUBLIC): with the strict '>' compare
+        // in lock()'s conflict resolution above, two same-ranked conflicting definitions on one member
+        // resolved by whichever HashSet<AtDefinition> iteration happened to visit first - and since
+        // AtDefinition's record-derived hashCode incorporates this enum's identity hashCode (Enum never
+        // overrides Object.hashCode()), that iteration order is stable within one JVM run but varies
+        // *between* runs. That silently broke this method's own documented contract ("widen defaults
+        // to public on conflict") on an unlucky run - a public-vs-default conflict on the same member
+        // would non-deterministically keep DEFAULT instead of widening to PUBLIC. Giving every level
+        // its own distinct rank makes the wider one always strictly greater, regardless of iteration
+        // order.
         return switch (access) {
-            case PUBLIC, DEFAULT -> VIS_PUBLIC; // widen defaults to public on conflict (Horizon behaviour)
+            case PUBLIC -> VIS_PUBLIC;
             case PROTECTED -> VIS_PROTECTED;
+            case DEFAULT -> VIS_DEFAULT;
             case PRIVATE -> VIS_PRIVATE;
         };
     }
