@@ -1,0 +1,12 @@
+# Example access-transformer, in Cherry/Horizon's grammar (see the main repository README's
+# "Access-transformer (.at) file format" section). This is intentionally the same illustrative
+# target the README itself uses - Cherry validates AT targets lazily, at class-load time, not
+# against real bytecode at build time, so this file does not need net.minecraft classes on the
+# compile classpath; cherry-gradle-plugin's own build-time validation only checks grammar (see
+# dev.iyanz.cherry.gradle.AccessTransformerValidator), not that the target actually exists.
+
+# widen a package-private field to public
+public net.minecraft.world.entity.Mob goalSelector
+
+# widen a method to public and drop `final` so it can be overridden
+public-f net.minecraft.world.entity.SomeMob tickLeash()V

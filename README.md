@@ -41,6 +41,11 @@ Horizon's launcher design.**
 
 ## Features
 
+- **A Gradle plugin to author Cherry plugins**: `dev.iyanz.cherry` (`cherry-gradle-plugin/` in this
+  repository) wires the SpongePowered Mixin annotation processor + refmap generation onto your own
+  Paper-plugin project and auto-generates `cherry-plugin.json` + the SpongePowered Mixin config from
+  a `cherry { }` DSL block, so nothing in the schema below needs to be hand-written. See
+  [Authoring a Cherry plugin (Gradle)](#authoring-a-cherry-plugin-gradle).
 - **One enable flag**: `-Dcherry.enable.mixin=true` (plus back-compat aliases) turns on the whole
   engine — both the Leaves mixin/widener path and Cherry's AT path.
 - **Multi-format unified discovery**: `cherry-plugin.json`, the legacy `leaves-plugin.json`,
@@ -265,6 +270,169 @@ a real Fabric mod loader.
   combining a fresh dry-run with what the AT and Fabric engines actually have active right now
   (locked/registered counts, extracted configs/wideners). This is the data source intended for a
   future `/cherry` operator command — this repository adds the API only, not the command.
+
+## Authoring a Cherry plugin (Gradle)
+
+Before this module existed, authoring a Cherry plugin meant hand-wiring SpongePowered Mixin's
+annotation processor onto your own source set, hand-writing `cherry-plugin.json`, hand-writing a
+SpongePowered Mixin config JSON, and hoping the refmap the annotation processor generated actually
+lined up with all of the above — the single biggest adoption blocker for Cherry. **`cherry-gradle-plugin/`**
+is a Gradle plugin, applied to *your own* Paper-plugin project, that does all of that for you: it
+wires the Mixin annotation processor + refmap generation onto your `main` source set, and
+auto-generates `cherry-plugin.json` and the SpongePowered Mixin config from a small `cherry { }`
+DSL block. **This replaces the manual annotation-processor + hand-written-JSON path** described in
+[Plugin author guide](#plugin-author-guide) below for any project willing to build with Gradle — that
+section is still accurate and still the right reference for the exact schema this plugin's output
+targets, and for Fabric-format or non-Gradle authors.
+
+This repository is not just documentation for that plugin — it also *builds* it, and proves it works
+against a real example. See [Building this repository](#building-this-repository) for how the three
+Gradle projects here (`cherry` the root/library, `cherry-gradle-plugin/`, `example-plugin/`) fit
+together.
+
+### Applying the plugin
+
+```kotlin
+// build.gradle.kts, in YOUR OWN Paper-plugin project (not this repository)
+plugins {
+    java
+    id("dev.iyanz.cherry") version "1.0.0"
+}
+```
+
+`dev.iyanz.cherry` is published the same way this repository's own root artifact is documented under
+[How Cherry is actually consumed](#how-cherry-is-actually-consumed) — as a real, independently buildable
+Gradle module, not (yet) pushed to Gradle's Plugin Portal. Resolve it either via
+[JitPack](https://jitpack.io) (see this repository's `jitpack.yml`, which builds
+`cherry-gradle-plugin/` specifically — see the comment in that file for why the root project alone
+isn't enough) by adding `maven("https://jitpack.io")` to your `pluginManagement.repositories` and
+depending on `com.github.YanIanZ:Cherry:<commit-or-tag>` as the artifact backing the `dev.iyanz.cherry`
+plugin ID, or by publishing this repository's `cherry-gradle-plugin/` to your own Maven repository
+with `./gradlew -p cherry-gradle-plugin publishToMavenLocal` (or `publish`, once you configure a real
+`publishing.repositories` target in that module) and adding `mavenLocal()` (or your repository) to
+`pluginManagement.repositories`.
+
+### The `cherry { }` DSL
+
+```kotlin
+cherry {
+    // Written into cherry-plugin.json's "name" field. Defaults to the Gradle project's name.
+    pluginName = "MyPlugin"
+
+    // The dot-separated package (under this project's own compiled classes) holding your @Mixin
+    // classes. Required for a mixin block at all - a plugin with only accessTransformers below may
+    // leave this unset. Setting it is what turns on the Mixin annotation-processor/refmap wiring,
+    // the compileOnly/annotationProcessor Mixin+MixinExtras dependencies, and the
+    // generateCherryMixinConfig task - see "What gets generated" below.
+    mixinPackage = "com.me.myplugin.mixin"
+
+    // Optional. Extra, already-existing SpongePowered Mixin config file names (e.g. hand-authored,
+    // shipped as a resource) to reference in cherry-plugin.json's mixin.mixins list ALONGSIDE the
+    // one this plugin generates from mixinPackage above. Rarely needed.
+    mixinConfigs.set(listOf("legacy.mixins.json"))
+
+    // Optional SpongePowered Mixin config fields, written straight into the generated config -
+    // Cherry itself only reads package/refmap/priority (see MixinConfigMeta), but real Mixin also
+    // reads minVersion/compatibilityLevel/required once the config is registered.
+    priority = 900
+    minVersion = "0.8"
+    compatibilityLevel = "JAVA_21"
+    required = true // default; set false to make every mixin in this config optional
+
+    // Access-transformer (.at) files, in Cherry/Horizon's grammar (see "Access-transformer (.at)
+    // file format" below) - validated against that exact grammar at build time (the build fails
+    // with the offending file/line on a syntax error, rather than Cherry's runtime "log and skip").
+    accessTransformers.from("src/main/cherry/myplugin.at")
+
+    // Optional Fabric access-widener file(s) - Cherry's manifest only has room for one
+    // (mixin.access-widener), so more than one input file here is merged (see AccessWidenerMerger);
+    // requires mixinPackage to be set (access-widener only ever lives inside the mixin block).
+    accessWideners.from("src/main/cherry/myplugin.accesswidener")
+}
+
+dependencies {
+    // Whatever your @Mixin classes actually target - cherry-gradle-plugin does not add this for
+    // you (see cherry.serverApi below for the equivalent helper), since it varies per plugin.
+    compileOnly("io.papermc.paper:paper-api:1.20.4-R0.1-SNAPSHOT")
+}
+```
+
+`cherry.serverApi("io.papermc.paper:paper-api:1.20.4-R0.1-SNAPSHOT")` is an equivalent convenience
+method on the extension for the dependency block above — a thin `compileOnly(...)` wrapper, added
+because there is no separate published "Cherry API" artifact to add alongside it (see
+[How Cherry is actually consumed](#how-cherry-is-actually-consumed) — Cherry is vendored source, not
+a library your mixins call into).
+
+### What gets generated
+
+Running `./gradlew build` on a project with the plugin applied produces, inside the built jar, all
+of the following **without you writing any of them by hand**:
+
+| Generated file | From | Jar path |
+|---|---|---|
+| `cherry-plugin.json` | the whole `cherry { }` block | jar root |
+| the SpongePowered Mixin config (e.g. `mixins.myplugin.json`) | `mixinPackage` + every compiled `@Mixin` class found under it (via bytecode scan — see `MixinClassScanner`) + `priority`/`minVersion`/`compatibilityLevel`/`required` | jar root |
+| the refmap (e.g. `mixins.myplugin.refmap.json`) | the real SpongePowered Mixin annotation processor, run as part of `compileJava` via `-AoutRefMapFile` | jar root |
+| your `.at` file(s) | `accessTransformers`, validated then copied through unchanged | jar root, own file name |
+| your access-widener | `accessWideners`, copied through (or merged, if more than one) | jar root, `accessWidenerName` (defaults to `<project-name>.accesswidener`) |
+
+Your compiled `@Mixin` classes and the rest of your plugin, plus your own `paper-plugin.yml`, are in
+the jar exactly as they always would be — the plugin only *adds* the five items above; it never
+changes how you write the rest of your plugin. Every one of the generated files targets exactly the
+schema documented in [Plugin author guide](#plugin-author-guide) below, byte for byte — this module
+exists specifically so nothing about that schema needs to be memorized or copy-pasted by hand.
+
+### Pinned versions
+
+`compileOnly` + `annotationProcessor` get `net.fabricmc:sponge-mixin:0.17.3+mixin.0.8.7` added
+automatically (only when `mixinPackage` is set), and `compileOnly` gets
+`io.github.llamalad7:mixinextras-common:0.5.0`. Both are pinned to match what Cherry's runtime
+actually bundles: the Mixin version matches this repository's own root `build.gradle.kts`
+dependency exactly (the same build Cherry's runtime — vendored into SourbyClip's launcher — compiles
+and runs against), and the MixinExtras version matches LeavesMC/Leavesclip's own `java21` module
+(Cherry's mixin base), which vendors `io.github.llamalad7:mixinextras-common:0.5.0` directly rather
+than a Fabric-loader-specific bootstrap variant. Compiling your mixins against any other version
+risks refmap/annotation drift against what the server actually loads at runtime — see the task this
+module was built from, and `CherryGradlePlugin.MIXIN_VERSION`/`MIXIN_EXTRAS_VERSION` for the single
+source of truth.
+
+### A note on the annotation processor's obfuscation checks
+
+The Mixin annotation processor ships with a Forge/MCP-era `ObfuscationServiceMCP` that always
+registers a "notch" obfuscation environment, regardless of any option — there is no way to opt out
+of the environment itself. Since Cherry/Leavesclip never remaps mixins (targets are plain
+Mojang-mapped Paper/NMS classes, not Forge/MCP-obfuscated ones — see [How it works](#how-it-works)),
+every `@Inject`/`@Shadow`/etc. target is reported as missing obfuscation data for that irrelevant
+environment on every single compile. javac's own default severity for that diagnostic is **ERROR**
+unless the annotation processor happens to detect an IDE compiler environment (which was observed,
+while building this module, to be non-deterministic across otherwise-identical Gradle invocations —
+passing once, then failing on every subsequent clean build in the same checkout). `cherry-gradle-plugin`
+therefore unconditionally downgrades every `NO_OBFDATA_FOR_*` message to a non-fatal note via the
+annotation processor's own `-AMSG_<MessageType>=note` mechanism, so this never surfaces to a plugin
+author at all. You do not need to do anything about this — it is documented here only so the refmap
+`Note:` lines you may still see in build output make sense (they are expected and harmless).
+
+### Your environment must still provide
+
+- **The actual API/server jar your `@Mixin` classes target**, via your own `compileOnly` dependency
+  (or `cherry.serverApi(...)`) — this repository's `example-plugin/` targets plain `org.bukkit.Bukkit`
+  from a publicly resolvable `paper-api` dependency specifically so it stays buildable without extra
+  setup; a real Cherry plugin targeting internal (NMS) server classes instead needs your own mapped
+  server jar on that same classpath (e.g. via `paperweight-userdev` or an equivalent dev bundle) —
+  `cherry-gradle-plugin` does not fetch, patch, or remap a server jar for you.
+- **A JDK new enough for whatever server version you target** — this repository's own `example-plugin`
+  needs JDK 25 purely because the `paper-api` version it depends on does; `cherry-gradle-plugin`
+  itself only requires JDK 21 to run.
+
+### Verifying it end to end
+
+`./gradlew :example-plugin:build` in this repository builds a minimal, real Cherry plugin
+(`example-plugin/`) that applies this plugin, contains one real `@Mixin` class
+(`MixinBukkitGreeting`, injecting into `org.bukkit.Bukkit#getVersion()`) and one `.at` file, and a
+normal `paper-plugin.yml`. Unzipping the result (`example-plugin/build/libs/example-plugin-1.0.0.jar`)
+shows exactly the five generated/staged files from the table above sitting alongside the compiled
+plugin — this is the same thing `./gradlew build` at this repository's root verifies as part of its
+own build.
 
 ## Plugin author guide
 
@@ -561,6 +729,40 @@ Tests additionally depend on `org.junit.jupiter:junit-jupiter`, and re-add `org.
 repository's own test execution has no host launcher supplying them at runtime the way SourbyClip
 does in production — see the comments in `build.gradle.kts` for exactly why each one is there. None
 of this affects the published `main`/sources/javadoc jars.
+
+### The Gradle-plugin and example-plugin modules
+
+Two more Gradle projects live in this repository, alongside the `cherry` root/library project
+covered above — see [Authoring a Cherry plugin (Gradle)](#authoring-a-cherry-plugin-gradle) for what
+they are and how a plugin author uses the first one:
+
+- **`cherry-gradle-plugin/`** — the `dev.iyanz.cherry` Gradle plugin itself. It is a *separate*
+  Gradle build (its own `settings.gradle.kts`), wired into this repository's root
+  `settings.gradle.kts` via `pluginManagement { includeBuild("cherry-gradle-plugin") }` — a normal
+  composite-build "plugin included build", the same pattern Gradle's own documentation uses for a
+  plugin developed alongside a project that consumes it. This is also what makes qualified task paths
+  like `./gradlew :cherry-gradle-plugin:build` work directly from this repository's root.
+  - `./gradlew -p cherry-gradle-plugin build` (or `./gradlew :cherry-gradle-plugin:build` from the
+    root) compiles it, runs its JUnit 5 test suite (pure-logic tests for manifest/mixin-config JSON
+    generation, `.at` grammar validation, access-widener merging, and the `@Mixin` bytecode scanner —
+    see `src/test/java` in that module — plus a `ProjectBuilder`-based functional test asserting the
+    extension/task/dependency wiring `CherryGradlePlugin.apply` performs), and runs Gradle's own
+    `validatePlugins` check (`java-gradle-plugin`'s built-in sanity check on task
+    caching/input-output annotations).
+  - `./gradlew -p cherry-gradle-plugin publishToMavenLocal` publishes it (plus its plugin-marker
+    artifact) to `~/.m2/repository/dev/iyanz/cherry/` — verified while building this module. See
+    [Applying the plugin](#applying-the-plugin) for how an external consumer resolves it from there
+    (or from JitPack — see this repository's `jitpack.yml`).
+- **`example-plugin/`** — a minimal, real Cherry plugin (applies `dev.iyanz.cherry`, one real
+  `@Mixin` class, one `.at` file, a normal `paper-plugin.yml`) that exists purely to prove the whole
+  toolchain end to end. `./gradlew :example-plugin:build` builds it; unzip
+  `example-plugin/build/libs/example-plugin-1.0.0.jar` to see the generated
+  `cherry-plugin.json`/mixin config/refmap sitting alongside the compiled plugin — see
+  [Verifying it end to end](#verifying-it-end-to-end) above.
+
+`./gradlew build` at this repository's root builds all three projects together (the `cherry` root
+project, `example-plugin` as a regular subproject, and `cherry-gradle-plugin` transitively, since
+`example-plugin` applying `id("dev.iyanz.cherry")` requires resolving and compiling it).
 
 ## Credits / attribution
 

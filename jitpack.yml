@@ -1,0 +1,11 @@
+jdk:
+  - openjdk21
+
+# cherry-gradle-plugin/ is a separate Gradle build (its own settings.gradle.kts - see the root
+# settings.gradle.kts's `pluginManagement { includeBuild("cherry-gradle-plugin") }` comment for why),
+# so JitPack's default "build the root project" behaviour would miss it entirely. This explicitly
+# builds and installs just that module into ~/.m2 (which is what JitPack serves back to consumers),
+# using the root project's own Gradle wrapper - see the README's "Authoring a Cherry plugin (Gradle)"
+# section for the resulting `dev.iyanz.cherry:cherry-gradle-plugin` coordinates.
+install:
+  - ./gradlew -p cherry-gradle-plugin publishToMavenLocal --no-daemon --console=plain
