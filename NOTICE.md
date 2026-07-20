@@ -114,9 +114,32 @@ section for the exact scope of what is (and is not) implemented.
 ## SpongePowered / Mixin
 
 - Repository: <https://github.com/SpongePowered/Mixin> (consumed via its Fabric fork,
-  `net.fabricmc:sponge-mixin`, a `compileOnly` build dependency of this repository)
+  `net.fabricmc:sponge-mixin`, pinned to `0.17.3+mixin.0.8.7` — the newest build currently published
+  — a `compileOnly` build dependency of this repository)
 - License: MIT
 
 Not modified or vendored by Cherry or by this repository; listed here because
 `src/hostStub/java/org/leavesmc/leavesclip/logger/{Logger,SimpleLogger}.java` (see the Leavesclip
 section above) implement Mixin's `ILogger` interface and use its `Level` enum.
+
+**Java 25 (class file major version 69) compatibility**: `net.fabricmc:sponge-mixin:0.17.3+mixin.0.8.7`
+transitively pulls `org.ow2.asm:asm`/`asm-tree`/`asm-commons`/`asm-util` version **9.8** — the first
+ASM release able to parse Java 25 class files (`Opcodes.V25 = 69`) that SpongePowered Mixin's
+bytecode transform relies on. Verified directly (not just by citation): an ASM 9.8 `ClassReader`
+parses one of this repository's own Java-25-compiled classes with no error, whereas the previously
+(explicitly, but never actually at runtime) pinned ASM 9.7.1 throws `IllegalArgumentException:
+Unsupported class file major version 69` on the identical input. See the README's
+[Java 25 compatibility](README.md#java-25-compatibility) section for the full account.
+
+## ASM (org.ow2.asm)
+
+- Repository: <https://gitlab.ow2.org/asm/asm>
+- License: BSD-3-Clause
+
+Not modified or vendored by Cherry or by this repository. Consumed transitively via
+`net.fabricmc:sponge-mixin` (see above, which pulls ASM 9.8) and directly pinned as a
+`compileOnly`/test-scoped build dependency (`org.ow2.asm:asm-tree:9.8`, matching the version
+`sponge-mixin` itself requires) for [`CherryAccessTransformers`](src/main/java/dev/iyanz/sourbyclip/cherry/at/CherryAccessTransformers.java)'s
+own bytecode rewriting. Never bundled into any artifact this repository publishes — in production the
+host (SourbyClip's launcher) always supplies ASM at runtime via Mixin, the same way it supplies Mixin
+itself.

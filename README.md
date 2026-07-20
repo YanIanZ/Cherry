@@ -730,6 +730,55 @@ repository's own test execution has no host launcher supplying them at runtime t
 does in production — see the comments in `build.gradle.kts` for exactly why each one is there. None
 of this affects the published `main`/sources/javadoc jars.
 
+### Java 25 compatibility
+
+SourbyCraft runs its servers on Java 25, so this repository (and specifically the `cherry` root/
+library module vendored into SourbyClip) is verified against it end to end. For a mixin project, the
+real risk of "Java 25 compatibility" is not the `javac` target — it is whether the ASM library that
+SpongePowered Mixin's bytecode transform is built on actually understands Java 25's class file format
+(major version **69**). An ASM release too old for it doesn't warn or degrade gracefully: it throws
+`IllegalArgumentException: Unsupported class file major version 69` the instant it tries to read a
+Java-25-compiled class, which would break every mixin applied to a Java 25 server, independent of what
+JDK compiled Cherry's own classes.
+
+- **Verified, not assumed**: `net.fabricmc:sponge-mixin:0.17.3+mixin.0.8.7` — the version this
+  repository pins, and the newest build currently published on `repo.spongepowered.org` (there is no
+  newer one to bump to) — itself transitively depends on `org.ow2.asm:asm` / `asm-tree` /
+  `asm-commons` / `asm-util`, all at **9.8** (`./gradlew dependencies --configuration
+  compileClasspath`). ASM 9.8 is the first ASM release that supports Java 25: its shipped
+  `Opcodes.class` bakes in `V25 = 69`, and — confirmed directly here, not just cited — an ASM 9.8
+  `ClassReader` parses one of this repository's own Java-25-compiled (`major version: 69`) class
+  files with no exception, while the same input thrown at the older ASM 9.7.1 (see below) throws
+  exactly the `Unsupported class file major version 69` error described above.
+- This repository's root `build.gradle.kts` used to pin `org.ow2.asm:asm-tree:9.7.1` directly (for
+  `CherryAccessTransformers`' own compile-time use of ASM's tree API). Gradle's normal
+  highest-version-wins conflict resolution was already silently bumping that up to 9.8 wherever
+  `sponge-mixin` was also on the same classpath (i.e. everywhere it mattered for actually reading
+  Java 25 bytecode at runtime/test-runtime) — but the stale explicit `9.7.1` was still misleading to
+  read and could diverge on classpaths that don't also pull in `sponge-mixin` (e.g.
+  `testCompileClasspath`, compile-time only, never affects behavior). It is now pinned explicitly to
+  `9.8`, matching what is actually resolved and used.
+- `cherry-gradle-plugin/`'s own `MixinClassScanner` build-time tool separately, and intentionally,
+  pins a newer `org.ow2.asm:asm:9.10.1` — it has to read whatever bytecode version the *plugin
+  author's own* project toolchain produces (this repository's own `example-plugin` already targets
+  JDK 25), independent of whatever Cherry's own runtime pin happens to be.
+- **Gradle-plugin toolchain**: `cherry-gradle-plugin/` itself still targets JDK 21 — deliberately
+  lower than Cherry's own JDK 25 runtime target, since a Gradle plugin should run inside *any*
+  consumer's Gradle daemon rather than force one specific JDK. This is forward-, not just backward-,
+  compatible: the whole repository (root project, the `cherry-gradle-plugin` included build, and
+  `example-plugin`, which itself targets JDK 25) was rebuilt end to end —
+  `clean`/`build`/`javadoc`/`test` — with the Gradle daemon itself running on JDK 25, with Gradle
+  auto-provisioning the JDK 21 compile toolchain the plugin module asks for from that same daemon. No
+  actual incompatibility was found, so it was deliberately left at 21 rather than bumped to 25 (bumping
+  it would narrow, not widen, which Gradle daemons can apply the plugin).
+- One real (unrelated to Java 25 itself) bug surfaced while running `javadoc` on JDK 25: a stray `|`
+  character in place of a closing `}` inside a `{@code annotationProcessor}` inline tag in
+  `CherryGradlePlugin.java` made `cherry-gradle-plugin`'s `javadoc` task fail outright (`unterminated
+  inline tag` / `element not closed: ol`). Fixed.
+- Net result: `./gradlew clean build javadoc test` is green on both Gradle builds in this repository
+  (47 tests in the root project, 40 in `cherry-gradle-plugin`, 0 failures), with the Gradle daemon and
+  every toolchain involved running on JDK 25.
+
 ### The Gradle-plugin and example-plugin modules
 
 Two more Gradle projects live in this repository, alongside the `cherry` root/library project

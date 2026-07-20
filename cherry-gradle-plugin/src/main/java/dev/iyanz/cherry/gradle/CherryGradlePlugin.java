@@ -41,7 +41,7 @@ import java.util.stream.Collectors;
  *   <li>applies {@code java} (if not already applied) and adds the SpongePowered Mixin repository;</li>
  *   <li>when {@link CherryExtension#getMixinPackage()} is set, adds {@code net.fabricmc:sponge-mixin}
  *       (pinned to {@link #MIXIN_VERSION}) to both {@code compileOnly} <i>and</i>
- *       {@code annotationProcessor|, and {@code io.github.llamalad7:mixinextras-common} (pinned to
+ *       {@code annotationProcessor}, and {@code io.github.llamalad7:mixinextras-common} (pinned to
  *       {@link #MIXIN_EXTRAS_VERSION}) to {@code compileOnly} - both pinned to match exactly what
  *       Cherry's runtime (vendored into SourbyClip's launcher) itself bundles, so an author's mixins
  *       are compiled against the identical Mixin/refmap machinery they will actually run under;</li>

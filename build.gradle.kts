@@ -59,7 +59,17 @@ dependencies {
     // is compileOnly because the host (SourbyClip's Leavesclip-based launcher) always has ASM on
     // its runtime classpath already (pulled in transitively by SpongePowered Mixin) - Cherry never
     // needs to bundle its own copy.
-    compileOnly("org.ow2.asm:asm-tree:9.7.1")
+    //
+    // Pinned to 9.8 (not just "whatever resolves") because that is exactly the ASM version
+    // net.fabricmc:sponge-mixin:0.17.3+mixin.0.8.7 itself transitively requires (verified via
+    // `./gradlew dependencies` - sponge-mixin 0.17.3 depends on asm/asm-tree/asm-commons/asm-util
+    // all at 9.8), i.e. what actually ships on the runtime classpath inside SourbyClip. ASM 9.8 is
+    // the first ASM release that understands class file major version 69 (Java 25) - see the
+    // sibling note on cherry-gradle-plugin's own (newer, 9.10.1) ASM pin for why that module
+    // intentionally uses a different version than this one. Before 9.8, ASM (and therefore any
+    // Mixin/AT bytecode transform built on it) would throw "Unsupported class file major version
+    // 69" the moment it tried to parse a class compiled with `--release 25`.
+    compileOnly("org.ow2.asm:asm-tree:9.8")
 
     // Cherry's Logger/SimpleLogger usage (via hostStub, see below) resolves down to
     // org.spongepowered.asm.logging.ILogger/Level, so javac needs this on `main`'s compile
@@ -91,7 +101,10 @@ dependencies {
     // reproduction. None of this affects the published main/sources/javadoc jars. asm-tree is
     // `testImplementation` (not testRuntimeOnly) because CherryAccessTransformersTest inspects the
     // transformed bytecode directly with ASM's tree API to assert access flags actually changed.
-    testImplementation("org.ow2.asm:asm-tree:9.7.1")
+    // Same 9.8 pin as the compileOnly declaration above, for the same reason (matches what
+    // sponge-mixin 0.17.3+mixin.0.8.7 actually provides at runtime and supports Java 25 class
+    // files).
+    testImplementation("org.ow2.asm:asm-tree:9.8")
     testRuntimeOnly("net.fabricmc:sponge-mixin:0.17.3+mixin.0.8.7") {
         exclude(group = "com.google.code.gson", module = "gson")
         exclude(group = "com.google.guava", module = "guava")
