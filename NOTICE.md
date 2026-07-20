@@ -1,0 +1,109 @@
+# Notice
+
+Cherry is a derivative work combining original SourbyCraft code with code ported/adapted from two
+upstream projects. All three are MIT-licensed; this file records the per-file provenance and
+reproduces the relevant upstream license texts in full, in addition to the stacked copyright
+notices in [LICENSE](LICENSE).
+
+## LeavesMC / Leavesclip
+
+- Repository: <https://github.com/LeavesMC/Leavesclip>
+- License: MIT (`licenses/license.txt` in that repository)
+- Copyright: `(c) 2021 Kyle Wood (DenWav)`, `(c) 2023 LeavesMC` (Leavesclip is itself a fork of
+  [PaperMC/Paperclip](https://github.com/PaperMC/Paperclip), hence the DenWav copyright line)
+
+Cherry's own classes (`CherryPluginResolver`, `CherryAccessTransformers`) import and integrate with
+Leavesclip's `org.leavesmc.leavesclip.logger.{Logger,SimpleLogger}` and
+`org.leavesmc.leavesclip.mixin.{LeavesPluginMeta,PluginResolver}`, which are part of SourbyClip's
+vendored copy of Leavesclip and are **not part of this repository**. Because Leavesclip is a
+launcher (not a published library), this repository's `src/hostStub/java` directory reproduces a
+minimal, explicitly-labeled compile-time-only subset of those classes' API surface so that Cherry's
+own source can be compiled and documented standalone — see the javadoc on each file in that
+directory, and the "How Cherry is actually consumed" section of [README.md](README.md), for exactly
+what is and is not reproduced and why. None of `src/hostStub` is packaged into any artifact this
+repository publishes.
+
+Leavesclip's own Mixin support additionally incorporates code from:
+
+- **[FabricMC/fabric-loader](https://github.com/FabricMC/fabric-loader)** — Apache License 2.0.
+  Cherry's own six source files do not import Fabric Loader directly; it is part of the
+  surrounding Leavesclip mixin bootstrap.
+- **[LlamaLad7/MixinExtras](https://github.com/LlamaLad7/MixinExtras)** — MIT License. Same as
+  above: part of the surrounding Leaves mixin engine, not imported by Cherry's own classes.
+
+```
+The MIT License (MIT)
+
+Copyright (c) 2021 Kyle Wood (DenWav)
+Copyright (c) 2023 LeavesMC
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+## CraftCanvasMC / Horizon
+
+- Repository: <https://github.com/CraftCanvasMC/Horizon>
+- License: MIT (`LICENSE` in that repository)
+- Copyright: `(c) 2025 CanvasMC`
+
+[`CherryAccessTransformers`](src/main/java/dev/iyanz/sourbyclip/cherry/at/CherryAccessTransformers.java),
+[`AtDefinition`](src/main/java/dev/iyanz/sourbyclip/cherry/at/AtDefinition.java), and
+[`AccessChange`](src/main/java/dev/iyanz/sourbyclip/cherry/at/AccessChange.java) are ported from
+Horizon's `io.canvasmc.horizon.transformer.widener` package (`TransformerContainer`,
+`Definition`, `TransformOperation`), de-branded into Cherry. The `.at` line grammar and the ASM
+access-flag bit-twiddling are preserved verbatim. Differences from the original, made to run
+standalone inside SourbyClip's Leaves-based launcher instead of Horizon's own architecture, are
+documented in each class's javadoc and summarized in [README.md](README.md)'s Limitations section
+(no `fastutil` collections, lazy non-fatal target validation instead of Horizon's mixin-service
+validation pass, and the added `applyToBytes(byte[])` entry point for Leaves'
+`MixinURLClassLoader`).
+
+```
+MIT License
+
+Copyright (c) 2025 CanvasMC
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+## SpongePowered / Mixin
+
+- Repository: <https://github.com/SpongePowered/Mixin> (consumed via its Fabric fork,
+  `net.fabricmc:sponge-mixin`, a `compileOnly` build dependency of this repository)
+- License: MIT
+
+Not modified or vendored by Cherry or by this repository; listed here because
+`src/hostStub/java/org/leavesmc/leavesclip/logger/{Logger,SimpleLogger}.java` (see the Leavesclip
+section above) implement Mixin's `ILogger` interface and use its `Level` enum.
